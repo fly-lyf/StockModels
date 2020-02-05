@@ -45,6 +45,8 @@ def initialize(context):
     g.dailyEarning = {}
     # 盘中监测跌停股票开盘已卖出后，防止收盘时重复下单kv
     g.monitoring = {}
+    # 盘中监测开关
+    g.monitorSwitch = True
     # 收盘集合竞价时间：深市2006年7月（日期不详），沪市2018年8月20日及以后,创板应该一直有
     g.time60 = datetime.datetime.strptime("2018-08-20", "%Y-%m-%d")
     g.time00_30 = datetime.datetime.strptime("2006-07-01", "%Y-%m-%d")
@@ -68,10 +70,10 @@ def before_trading_start(context):
     g.todayStr = str(tradeDays[-1])# 今天日期的字符串
     g.yesterdayStr = str(tradeDays[-2])# 昨天日期的字符串
     g.yesterdayBeforeStr = str(tradeDays[-3])# 前天日期的字符串
-    g.todaySell = {}# 下单成功flag，检查普通卖单是否成功，成功则不再下单,0失败1成功
+    g.todaySell = {}# 下单成功flag，检查普通卖单是否成功，成功则不再下单,0失败1成功2已进入跌停列表,等待次日
     g.todayBuy = {}# 下单成功flag，检查普通买单是否成功，用于盘中监测
     g.limitDownRecord = {}#已加入跌停列表记录
-    g.todayLimitDown = {}# 下单成功flag，检查跌停卖单是否成功，成功则不再下单,0失败、1成功、2等待次日
+    g.todayLimitDown = {}# 下单成功flag，检查跌停卖单是否成功，成功则不再下单,0失败、1成功
     g.positions = list(context.portfolio.long_positions.values())# 开盘前暂存持仓
     g.monitoring[g.todayStr] = []
     
@@ -97,10 +99,10 @@ def on_strategy_end(context):
         outputStr += str(_date)
         if len(_records) != 0:
             for _record in _records:
-                outputStr += ' '+_record['code'] +' '+_record['name'] +' '+ str(_record['amount']) +' '+str(_record['fluctuation'])+' '+str(_record['price'])+'\n'
-                if _record["direct"] == 'sell' :
+                outputStr += ' '+_record['code'] +' '+_record['name'] +' '+ str(_record['amount']) +' '+str(_record['fluctuation'])+' '+str(_record['price'])+' '
+                if _record["direct"] == 'close':
                     outputStr += ' 卖 '+str(_record["earningRate"]) +' '+str(_record["holdingDays"])+'\n'
-                if _record["direct"] == 'buy' :
+                if _record["direct"] == 'open' :
                     outputStr += ' 买\n'
         else:
             outputStr += '\n'
@@ -163,7 +165,7 @@ def market_open(context):
         for orderStock in g.chosenStock[g.yesterdayStr]:
             result = order_value(orderStock, money)
             if result:
-               g.todayBuy[orderStock] = 1 
+                g.todayBuy[orderStock] = 1 
 
                
                
@@ -181,22 +183,23 @@ def before_market_close_callAuction(context):
 def before_market_close_marketOrder(context):
     money = context.portfolio.total_value * 0.1
     # 盘中价格监测,出现跌停直接挂单卖出
-    if(g.yesterdayStr in g.chosenStock and g.chosenStock[g.yesterdayStr]):
-        for orderStock in g.chosenStock[g.yesterdayStr]:
-            if (orderStock in g.todayBuy) and (g.todayBuy[orderStock] == 1):#买进成功的股票才进行操作
-                minutePrice = get_price(orderStock, count=1, frequency='minute',fields=['low_limit','high_limit','open','close','low','high'], end_date=context.current_dt)
-                if float(minutePrice['low_limit']) == float(minutePrice['close']) or float(minutePrice['low_limit']) == float(minutePrice['open']):# 发现跌停
-                    if(orderStock in g.todaySell and g.todaySell[orderStock] == 2):#查看是否已进入跌停列表
-                        continue
-                    else:#发现未记录跌停则加入
-                        log.error('发现盘中跌停，加入跌停列表:'+orderStock)
-                        g.limitDown.append(orderStock)
-                        g.todaySell[orderStock] = 2
-                        g.monitoring[g.todayStr].append(orderStock)
-    for _limitDown in g.limitDown:
-        if(_limitDown in g.todayLimitDown and g.todayLimitDown[_limitDown] == 0):
-            log.error('跌停列表今日卖出失败:'+_limitDown)
-            g.todaySell[_limitDown] = 2
+    if g.monitorSwitch == True:
+        if(g.yesterdayStr in g.chosenStock and g.chosenStock[g.yesterdayStr]):#昨天选出的股票列表存在
+            for orderStock in g.chosenStock[g.yesterdayStr]:
+                if (orderStock in g.todayBuy) and (g.todayBuy[orderStock] == 1):#今天买进成功的股票才进行操作
+                    minutePrice = get_price(orderStock, count=1, frequency='minute',fields=['low_limit','high_limit','open','close','low','high'], end_date=context.current_dt)
+                    if float(minutePrice['low_limit']) == float(minutePrice['close']) or float(minutePrice['low_limit']) == float(minutePrice['open']):# 发现跌停
+                        if(orderStock in g.todaySell and g.todaySell[orderStock] == 2):#查看是否已进入跌停列表
+                            continue
+                        else:#发现未记录跌停则加入
+                            log.error('发现盘中跌停，加入跌停列表:'+orderStock)
+                            g.limitDown.append(orderStock)
+                            g.todaySell[orderStock] = 2
+                            g.monitoring[g.todayStr].append(orderStock)
+        # for _limitDown in g.limitDown:
+        #     if(_limitDown in g.todayLimitDown and g.todayLimitDown[_limitDown] == 0):
+        #         log.error('跌停列表今日卖出失败:'+_limitDown)
+        #         g.todaySell[_limitDown] = 2
             
     # 选股日的上一天的股票，临近收盘普通收盘价卖出，操作为挂跌停卖出
     if context.current_dt.time()<datetime.time(14,57,00):
@@ -233,52 +236,54 @@ def after_market_close(context):
     # 更新每日持仓率
     g.positionRate[g.todayStr] = round((context.portfolio.positions_value/context.portfolio.total_value),4)
     
-    # 跌停股票订单，昨日及以前的跌停股票交易成功的踢出列表
-    limitDown = []
-    for _stock in g.limitDown:
-        limitDown.append(_stock)
-    for _limitDown in g.limitDown:
-        todayPrice = get_price(_limitDown, count=1, fields=['open','close','high','low','high_limit','factor'], end_date=g.todayStr)
-        # 得到订单记录
-        orders = get_orders(security=_limitDown)
-        if(len(orders.values()) == 0):
-            log.error('跌停订单有空值,应该是下单失败'+str(_limitDown+current_data[_limitDown].name))
-            continue
-        if(len(orders.values()) > 1):
-            log.error(str(context.current_dt) +' '+ str(_limitDown+current_data[_limitDown].name)+' 金额(跌停)太大，一个订单居然放不下')
-        # 在成交记录中核对是否成交
-        for _trade in list(trades.values()):
-            orderObj = list(orders.values())[0]
-            if(_trade.order_id == orderObj.order_id and orderObj.action == 'close'):
-                limitDown.remove(_limitDown)
-                todayFactor = todayPrice['factor']
-                if(float(todayFactor) != 1.0):
-                    log.error('复权因子不是1')
-                single = {}
-                single['desc'] = '卖出（前日跌停）：'+_limitDown+' '+current_data[_limitDown].name+'，复权价格为'+str(orderObj.price)+'，除权价格为'+str(orderObj.price/float(todayFactor))+',股数为'+str(orderObj.amount)
-                single['name'] = current_data[_limitDown].name
-                single['amount'] = orderObj.amount
-                single['price'] = orderObj.price
-                single['code'] = _limitDown
-                single['direct'] = 'sell'
-                # 波动计算方法为开盘价和最低价？最低价和最高价？
-                single['fluctuation'] = float(abs(todayPrice['open']/todayPrice['low'] - 1))
-                # 计算收益率和持仓天数
-                for position in g.positions:
-                    if _limitDown in position.security:
-                        single['earningRate'] = (orderObj.price*orderObj.amount-orderObj.commission)/(position.avg_cost*orderObj.amount) - 1
-                        days = get_trade_days(start_date=position.init_time.date(), end_date=context.current_dt.date())
-                        single['holdingDays'] = (context.current_dt.date() - position.init_time.date()).days
-                        break
-                g.tradeRecord[g.todayStr].append(single)
-                break
-    if(len(limitDown) != 0):
-        log.error('有跌停股票未能当天卖出(包含盘中检测加入的当日跌停)：'+str(limitDown))
-        g.limitDown = limitDown
-    else:
-        g.limitDown = []
+    # # 跌停股票订单，昨日及以前的跌停股票交易成功的踢出列表
+    # limitDown = []
+    # for _stock in g.limitDown:
+    #     limitDown.append(_stock)
+    # for _limitDown in g.limitDown:
+    #     todayPrice = get_price(_limitDown, count=1, fields=['open','close','high','low','high_limit','factor'], end_date=g.todayStr)
+    #     # 得到订单记录
+    #     orders = get_orders(security=_limitDown)
+    #     if(len(orders.values()) == 0):
+    #         log.error('跌停订单有空值,应该是下单失败'+str(_limitDown+current_data[_limitDown].name))
+    #         continue
+    #     if(len(orders.values()) > 1):
+    #         log.error(str(context.current_dt) +' '+ str(_limitDown+current_data[_limitDown].name)+' 金额(跌停)太大，一个订单居然放不下')
+    #     # 在成交记录中核对是否成交
+    #     for _trade in list(trades.values()):
+    #         orderObj = list(orders.values())[0]
+    #         if(_trade.order_id == orderObj.order_id and orderObj.action == 'close'):
+    #             limitDown.remove(_limitDown)
+    #             todayFactor = todayPrice['factor']
+    #             if(float(todayFactor) != 1.0):
+    #                 log.error('复权因子不是1')
+    #             single = {}
+    #             single['desc'] = '卖出（前日跌停）：'+_limitDown+' '+current_data[_limitDown].name+'，复权价格为'+str(orderObj.price)+'，除权价格为'+str(orderObj.price/float(todayFactor))+',股数为'+str(orderObj.amount)
+    #             single['name'] = current_data[_limitDown].name
+    #             single['amount'] = orderObj.amount
+    #             single['price'] = orderObj.price
+    #             single['code'] = _limitDown
+    #             single['direct'] = 'sell'
+    #             # 波动计算方法为开盘价和最低价？最低价和最高价？
+    #             single['fluctuation'] = float(abs(todayPrice['open']/todayPrice['low'] - 1))
+    #             # 计算收益率和持仓天数
+    #             for position in g.positions:
+    #                 if _limitDown in position.security:
+    #                     single['earningRate'] = (orderObj.price*orderObj.amount-orderObj.commission)/(position.avg_cost*orderObj.amount) - 1
+    #                     days = get_trade_days(start_date=position.init_time.date(), end_date=context.current_dt.date())
+    #                     single['holdingDays'] = (context.current_dt.date() - position.init_time.date()).days
+    #                     break
+    #             g.tradeRecord[g.todayStr].append(single)
+    #             break
+    # if(len(limitDown) != 0):
+    #     log.error('有跌停股票未能当天卖出(包含盘中检测加入的当日跌停)：'+str(limitDown))
+    #     g.limitDown = limitDown
+    # else:
+    #     g.limitDown = []
                 
     #订单查询
+    check_trades(context,'limitdown')#这个必须在前
+    
     check_trades(context,'open')
     check_trades(context,'close')
     
@@ -399,19 +404,27 @@ def check_trades(context,direct):
     if direct == 'open':
         tradeList = g.yesterdayStr
         errorDirect = '买入'
-        decWord = '加入跌停列表：'
+        decWord = '直接放弃：'
+        operation = direct
     elif direct == 'close':
         tradeList = g.yesterdayBeforeStr
         errorDirect = '卖出'
-        decWord = '直接放弃：'
-    elif direct == 'limitdown':
-        errorDirect = '跌停'
         decWord = '加入跌停列表：'
+        operation = direct
+    elif direct == 'limitdown':
+        errorDirect = '卖出（跌停）'
+        decWord = '加入跌停列表：'
+        operation = 'close'
         
     nullCheckStock = []#用于null值筛选
     stocks = []#用于记录订单列表
-    if(tradeList in g.chosenStock):
-        nullCheckStock = g.chosenStock[tradeList]
+    if direct == 'limitdown':
+        for _stock in g.limitDown:
+            nullCheckStock = g.limitDown
+    else:
+        if(tradeList in g.chosenStock):
+            nullCheckStock = g.chosenStock[tradeList]
+            
     for _stock in nullCheckStock:
         stocks.append(_stock)
     # # 订单查询测试代码start
@@ -425,6 +438,7 @@ def check_trades(context,direct):
     #             log.info(get_orders(security=check))
     #             break
     # # 订单查询测试代码end
+    
     for _stock in nullCheckStock:
         todayPrice = get_price(_stock, count=1, fields=['open','close','high','low','high_limit','factor'], end_date=g.todayStr)
         orders = get_orders(security=_stock)
@@ -435,7 +449,7 @@ def check_trades(context,direct):
             log.error(str(context.current_dt) +' '+ str(_stock+current_data[_stock].name)+' 金额('+errorDirect+')太大，一个订单放不下或跌停')
         for _trade in list(trades.values()):
             orderObj = list(orders.values())[0]
-            if(_trade.order_id == orderObj.order_id and orderObj.action == direct):
+            if(_trade.order_id == orderObj.order_id and orderObj.action == operation):
                 stocks.remove(_stock)
                 todayFactor = todayPrice['factor']
                 if(float(todayFactor) != 1.0):
@@ -446,11 +460,11 @@ def check_trades(context,direct):
                 single['amount'] = orderObj.amount
                 single['price'] = orderObj.price
                 single['code'] = _stock
-                single['direct'] = direct
+                single['direct'] = operation
                 # 波动计算方法为开盘价和最低价？最低价和最高价？
                 single['fluctuation'] = float(abs(todayPrice['open']/todayPrice['low'] - 1))
                 
-                if direct == 'close':
+                if operation == 'close':
                     # 计算收益率和持仓天数
                     buyDate = context.current_dt.date()
                     for position in g.positions:
@@ -462,76 +476,37 @@ def check_trades(context,direct):
                 g.tradeRecord[g.todayStr].append(single)
                 break
     
-        
-        # 失败订单处理
-        if direct == 'close':
-            if(len(stocks) != 0):
-                log.error('有普通股票未能在当天'+errorDirect+'，' +decWord+str(stocks))
-            # 卖出失败股票处理，当日新产生的跌停股票加入跌停列表，普通未卖出加入待卖出列表
-            for _code in stocks:
-                soldTodayPrice = get_price(_code,count=1,fields=['close','low_limit','factor'], end_date=g.todayStr)
-                # 此处可优化为最低价达到跌停价的百分比即跌停卖出？
-                if(float(soldTodayPrice['close']) <= float(soldTodayPrice['low_limit'])):
-                    g.limitDown.append(_code)
-                else:
-                    g.failedSold.append(_code)
-                    
-        elif direct == 'open':
-            if len(stocks) != 0:
-                log.error('有普通股票未能在当天'+errorDirect+'，' +decWord+str(stocks))
-            #买入失败后踢出选中名单
-            for _code in stocks:
-                g.chosenStock[g.yesterdayStr].remove(_code)
-                
-        elif direct == 'limitdown':
-            if(len(stocks) != 0):
-                log.error('有跌停股票未能当天卖出(包含盘中检测加入的当日跌停)，'+decWord+str(stocks))
-                for _code in stocks:
-                    g.limitDown.append(_code)
+    # 失败订单处理
+    if direct == 'close':
+        if(len(stocks) != 0):
+            log.error('有普通股票未能在当天'+errorDirect+'，' +decWord+str(stocks))
+        # 卖出失败股票处理，当日新产生的跌停股票加入跌停列表，普通未卖出加入待卖出列表
+        for _code in stocks:
+            soldTodayPrice = get_price(_code,count=1,fields=['close','low_limit','factor'], end_date=g.todayStr)
+            # 此处可优化为最低价达到跌停价的百分比即跌停卖出？
+            if(float(soldTodayPrice['close']) <= float(soldTodayPrice['low_limit'])):
+                g.limitDown.append(_code)
             else:
-                g.limitDown = []
+                g.failedSold.append(_code)
                 
-    limitDown = []
-    for _stock in g.limitDown:
-        limitDown.append(_stock)
-    for _limitDown in g.limitDown:
-        todayPrice = get_price(_limitDown, count=1, fields=['open','close','high','low','high_limit','factor'], end_date=g.todayStr)
-        # 得到订单记录
-        orders = get_orders(security=_limitDown)
-        if(len(orders.values()) == 0):
-            log.error('跌停订单有空值,应该是下单失败'+str(_limitDown+current_data[_limitDown].name))
-            continue
-        if(len(orders.values()) > 1):
-            log.error(str(context.current_dt) +' '+ str(_limitDown+current_data[_limitDown].name)+' 金额(跌停)太大，一个订单居然放不下')
-        # 在成交记录中核对是否成交
-        for _trade in list(trades.values()):
-            orderObj = list(orders.values())[0]
-            if(_trade.order_id == orderObj.order_id and orderObj.action == 'close'):
-                limitDown.remove(_limitDown)
-                todayFactor = todayPrice['factor']
-                if(float(todayFactor) != 1.0):
-                    log.error('复权因子不是1')
-                single = {}
-                single['desc'] = '卖出（前日跌停）：'+_limitDown+' '+current_data[_limitDown].name+'，复权价格为'+str(orderObj.price)+'，除权价格为'+str(orderObj.price/float(todayFactor))+',股数为'+str(orderObj.amount)
-                single['name'] = current_data[_limitDown].name
-                single['amount'] = orderObj.amount
-                single['price'] = orderObj.price
-                single['code'] = _limitDown
-                single['direct'] = 'sell'
-                # 波动计算方法为开盘价和最低价？最低价和最高价？
-                single['fluctuation'] = float(abs(todayPrice['open']/todayPrice['low'] - 1))
-                # 计算收益率和持仓天数
-                for position in g.positions:
-                    if _limitDown in position.security:
-                        single['earningRate'] = (orderObj.price*orderObj.amount-orderObj.commission)/(position.avg_cost*orderObj.amount) - 1
-                        days = get_trade_days(start_date=position.init_time.date(), end_date=context.current_dt.date())
-                        single['holdingDays'] = (context.current_dt.date() - position.init_time.date()).days
-                        break
-                g.tradeRecord[g.todayStr].append(single)
-                break
+    elif direct == 'open':
+        if(len(stocks) != 0):
+            log.error('有普通股票未能在当天'+errorDirect+'，' +decWord+str(stocks))
+        #买入失败后踢出选中名单
+        for _code in stocks:
+            g.chosenStock[g.yesterdayStr].remove(_code)
+            
+    elif direct == 'limitdown':
+        if(len(stocks) != 0):
+            errorStr = '有跌停股票未能在当天'+errorDirect+'，' +decWord+str(stocks)
+            if g.monitorSwitch = True:
+                errorStr += '（含盘中监测跌停股票，在当天无法卖出）'
+            log.error(errorStr)
+            g.limitDown = stocks
+        else:
+            g.limitDown = []
+                
     
-         
-         
          
 # 连板统计当日新增
 def continousAddToday(context,code):
